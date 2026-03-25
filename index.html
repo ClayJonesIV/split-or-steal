@@ -151,6 +151,36 @@
   .spectator-box .spec-status { color:var(--muted); font-size:0.9rem; }
   .spec-result { margin-top:12px; font-size:1rem; }
 
+  /* Live match card for spectators */
+  .spec-match-card {
+    background:var(--card); border:1px solid var(--card-border); border-radius:var(--radius);
+    padding:16px; width:100%; margin-bottom:12px;
+  }
+  .spec-match-card.finished { opacity:0.6; }
+  .spec-match-header { display:flex; justify-content:space-between; align-items:center; margin-bottom:12px; }
+  .spec-match-players { font-weight:600; font-size:1.05rem; }
+  .spec-match-score { font-family:'Instrument Serif',serif; font-size:1.2rem; color:var(--gold); }
+  .spec-round-row {
+    display:flex; align-items:center; justify-content:space-between;
+    padding:6px 10px; background:var(--bg); border-radius:8px; margin-bottom:4px; font-size:0.85rem;
+  }
+  .spec-round-label { color:var(--muted); min-width:50px; }
+  .spec-round-choices { flex:1; text-align:center; }
+  .spec-round-pts { min-width:60px; text-align:right; color:var(--gold); font-weight:600; }
+  .spec-round-waiting { color:var(--muted); font-style:italic; text-align:center; flex:1; }
+  .spec-locked { color:var(--gold); font-weight:500; }
+  .spec-match-winner { text-align:center; margin-top:10px; font-weight:600; color:var(--split); font-size:0.95rem; }
+  .spec-match-winner.coin-flip { color:var(--gold); }
+
+  /* Coin flip */
+  .coin-flip-msg {
+    text-align:center; padding:20px; border-radius:var(--radius);
+    background:var(--bg); border:1px solid var(--gold); margin-top:8px;
+  }
+  .coin-flip-msg .coin { font-size:2.5rem; animation:coinSpin 1s ease; }
+  @keyframes coinSpin { 0%{transform:rotateY(0)} 50%{transform:rotateY(720deg)} 100%{transform:rotateY(1080deg)} }
+  .coin-flip-msg .flip-result { font-family:'Instrument Serif',serif; font-size:1.3rem; margin-top:8px; color:var(--gold); }
+
   /* ── Champion ── */
   #screen-champion { justify-content:center; flex:1; text-align:center; }
   .crown { font-size:4rem; margin-bottom:8px; }
@@ -765,11 +795,10 @@ function makeChoice(choice) {
     const isTied = matchMyScore === matchOppScore;
 
     if(normalRoundsOver && !isTied) {
-      // Match decided
       document.getElementById('matchNextBtn').textContent = 'See Result';
     } else if(normalRoundsOver && isTied) {
-      // Sudden death
-      document.getElementById('matchNextBtn').textContent = 'Sudden Death!';
+      // Coin flip — no more rounds
+      document.getElementById('matchNextBtn').textContent = 'Coin Flip!';
     } else {
       document.getElementById('matchNextBtn').textContent = 'Next Round';
     }
@@ -786,7 +815,47 @@ function matchNextRound() {
     return;
   }
 
-  // Signal ready
+  if(normalRoundsOver && isTied) {
+    // Coin flip! p1 generates the result, both players listen
+    hide('matchResult');
+    show('matchNextWait');
+    document.getElementById('matchNextWait').classList.remove('pulsing');
+
+    const match = bracket[myMatchIndex];
+
+    if(myId === match.p1) {
+      // p1 flips the coin and writes to Firebase
+      const coinWinner = Math.random() < 0.5 ? match.p1 : match.p2;
+      roomRef.child(`coinFlip/${myMatchIndex}`).set(coinWinner);
+    }
+
+    // Both players listen for the coin flip result
+    roomRef.child(`coinFlip/${myMatchIndex}`).on('value', snap => {
+      const coinWinner = snap.val();
+      if(!coinWinner) return;
+      roomRef.child(`coinFlip/${myMatchIndex}`).off();
+
+      // Show coin flip animation
+      document.getElementById('matchNextWait').innerHTML =
+        '<div class="coin-flip-msg"><div class="coin">🪙</div><div class="flip-result">' +
+        (coinWinner === myId ? 'You won the coin flip!' : `${playerName(coinWinner)} won the coin flip`) +
+        '</div></div>';
+
+      // After a brief delay, report result
+      setTimeout(() => {
+        // Override: coin flip winner wins the match
+        if(coinWinner === myId) {
+          matchMyScore += 0.5; // tiebreaker half-point so score display shows who won
+        } else {
+          matchOppScore += 0.5;
+        }
+        reportMatchResult();
+      }, 2500);
+    });
+    return;
+  }
+
+  // Normal next round — signal ready
   hide('matchResult');
   show('matchNextWait');
   document.getElementById('matchNextWait').textContent = 'Waiting for opponent...';
@@ -810,45 +879,57 @@ async function reportMatchResult() {
   const match = bracket[myMatchIndex];
   const winner = matchMyScore > matchOppScore ? myId : (match.p1 === myId ? match.p2 : match.p1);
 
-  // Only one player needs to write the result — use p1
+  // Determine display scores (strip coin flip half-point for display)
+  const p1IsMe = myId === match.p1;
+  let displayMyScore = Math.floor(matchMyScore);
+  let displayOppScore = Math.floor(matchOppScore);
+  const wasCoinFlip = matchMyScore % 1 !== 0 || matchOppScore % 1 !== 0;
+
+  // Only p1 writes the result
   if(myId === match.p1) {
     await roomRef.child(`bracket/${myMatchIndex}`).update({
-      p1Score: match.p1 === myId ? matchMyScore : matchOppScore,
-      p2Score: match.p2 === myId ? matchMyScore : matchOppScore,
-      winner: winner
+      p1Score: displayMyScore,
+      p2Score: displayOppScore,
+      winner: winner,
+      coinFlip: wasCoinFlip || null
     });
-
-    // Check if all matches in this stage are done
     await checkStageComplete();
+  } else {
+    // p2 writes their perspective
+    // (p1 handles the Firebase write, but we need correct display scores)
+    displayMyScore = Math.floor(matchMyScore);
+    displayOppScore = Math.floor(matchOppScore);
   }
 
-  // Show result screen
-  showMatchResultScreen(winner);
+  showMatchResultScreen(winner, wasCoinFlip, displayMyScore, displayOppScore);
 }
 
-function showMatchResultScreen(winner) {
+function showMatchResultScreen(winner, wasCoinFlip, myScore, oppScore) {
   showScreen('screen-match-result');
   const content = document.getElementById('matchResultContent');
   const match = bracket[myMatchIndex];
   const oppId = match.p1 === myId ? match.p2 : match.p1;
+  const coinNote = wasCoinFlip ? '<div style="color:var(--gold); font-size:0.85rem; margin-top:8px;">🪙 Decided by coin flip (scores were tied)</div>' : '';
 
   if(winner === myId) {
     content.innerHTML = `
       <div style="font-size:3rem; margin-bottom:12px;">🎉</div>
       <div style="font-family:'Instrument Serif',serif; font-size:2rem; color:var(--split); margin-bottom:8px;">You Won!</div>
-      <div style="color:var(--muted); margin-bottom:16px;">
-        ${matchMyScore} — ${matchOppScore} vs ${playerName(oppId)}
+      <div style="color:var(--muted); margin-bottom:8px;">
+        ${myScore} — ${oppScore} vs ${playerName(oppId)}
       </div>
-      <div style="color:var(--text); font-size:0.95rem;">You advance to the next round!</div>
+      ${coinNote}
+      <div style="color:var(--text); font-size:0.95rem; margin-top:12px;">You advance to the next round!</div>
     `;
   } else {
     content.innerHTML = `
       <div style="font-size:3rem; margin-bottom:12px;">😤</div>
       <div style="font-family:'Instrument Serif',serif; font-size:2rem; color:var(--steal); margin-bottom:8px;">Eliminated</div>
-      <div style="color:var(--muted); margin-bottom:16px;">
-        ${matchMyScore} — ${matchOppScore} vs ${playerName(oppId)}
+      <div style="color:var(--muted); margin-bottom:8px;">
+        ${myScore} — ${oppScore} vs ${playerName(oppId)}
       </div>
-      <div style="color:var(--text); font-size:0.95rem;">You can still watch the rest of the tournament!</div>
+      ${coinNote}
+      <div style="color:var(--text); font-size:0.95rem; margin-top:12px;">You can still watch the rest of the tournament!</div>
     `;
   }
 }
@@ -922,23 +1003,26 @@ async function checkStageComplete() {
 }
 
 // ══════════════════════════════
-//  SPECTATE
+//  SPECTATE (LIVE VIEW)
 // ══════════════════════════════
 function enterSpectate() {
   showScreen('screen-spectate');
 
   const totalStages = bracket.reduce((max,m) => Math.max(max, m.stageIndex), 0) + 1;
   document.getElementById('specTitle').textContent = stageName(currentStageIndex, totalStages);
-  document.getElementById('specSubtitle').textContent = 'Matches in progress...';
+  document.getElementById('specSubtitle').textContent = 'Watch the action live!';
 
-  // Render active matches
-  renderSpectatorMatches();
+  buildSpectatorCards();
 
-  // Listen for updates
+  // Listen for live round data
+  roomRef.child('matchData').on('value', snap => {
+    updateSpectatorCards(snap.val() || {});
+  });
+
+  // Listen for bracket changes (winners)
   roomRef.child('bracket').on('value', snap => {
     bracket = snap.val() || [];
-    renderSpectatorMatches();
-
+    updateSpectatorWinners();
     const stageMatches = bracket.filter(m => m.stageIndex === currentStageIndex);
     const allDone = stageMatches.every(m => m.winner);
     if(allDone) {
@@ -947,43 +1031,120 @@ function enterSpectate() {
     }
   });
 
+  // Listen for coin flips
+  roomRef.child('coinFlip').on('value', snap => {
+    const flips = snap.val() || {};
+    Object.entries(flips).forEach(([matchIdx, winnerId]) => {
+      const card = document.getElementById('spec-card-' + matchIdx);
+      if(!card || card.querySelector('.spec-coin-flip')) return;
+      const flipEl = document.createElement('div');
+      flipEl.className = 'spec-coin-flip coin-flip-msg';
+      flipEl.innerHTML = '<div class="coin">🪙</div><div class="flip-result">Coin flip: ' + playerName(winnerId) + ' advances!</div>';
+      card.appendChild(flipEl);
+    });
+  });
+
   // Listen for stage advance or champion
   roomRef.on('value', snap => {
     const d = snap.val();
     if(!d) return;
     if(d.state === 'champion') {
-      roomRef.off();
-      roomRef.child('bracket').off();
+      roomRef.off(); roomRef.child('matchData').off(); roomRef.child('bracket').off(); roomRef.child('coinFlip').off();
       showChampion(d.champion);
       return;
     }
     if((d.currentStage || 0) !== currentStageIndex) {
-      roomRef.off();
-      roomRef.child('bracket').off();
+      roomRef.off(); roomRef.child('matchData').off(); roomRef.child('bracket').off(); roomRef.child('coinFlip').off();
       currentStageIndex = d.currentStage;
       loadBracketView();
     }
   });
 }
 
-function renderSpectatorMatches() {
+function buildSpectatorCards() {
   const container = document.getElementById('specMatchList');
   container.innerHTML = '';
   const stageMatches = bracket.filter(m => m.stageIndex === currentStageIndex && !m.isBye);
 
   stageMatches.forEach(m => {
-    const row = document.createElement('div');
-    row.className = 'bracket-match' + (m.winner ? '' : ' active-match');
-    if(m.winner) {
-      const p1class = m.winner===m.p1 ? 'winner' : 'loser';
-      const p2class = m.winner===m.p2 ? 'winner' : 'loser';
-      row.innerHTML = `<span class="bm-player ${p1class}">${playerName(m.p1)}</span><span class="bm-vs">vs</span><span class="bm-player ${p2class}">${playerName(m.p2)}</span><span class="bm-score c-gold">${m.p1Score}-${m.p2Score}</span>`;
-    } else {
-      row.innerHTML = `<span class="bm-player">${playerName(m.p1)}</span><span class="bm-vs">vs</span><span class="bm-player">${playerName(m.p2)}</span><span class="bm-score c-muted">...</span>`;
-    }
-    container.appendChild(row);
+    const card = document.createElement('div');
+    card.className = 'spec-match-card';
+    card.id = 'spec-card-' + m.matchIndex;
+    card.innerHTML =
+      '<div class="spec-match-header">' +
+        '<span class="spec-match-players">' + playerName(m.p1) + ' vs ' + playerName(m.p2) + '</span>' +
+        '<span class="spec-match-score" id="spec-score-' + m.matchIndex + '">0 — 0</span>' +
+      '</div>' +
+      '<div id="spec-rounds-' + m.matchIndex + '"></div>' +
+      '<div id="spec-winner-' + m.matchIndex + '"></div>';
+    container.appendChild(card);
   });
 }
+
+function updateSpectatorCards(allMatchData) {
+  const stageMatches = bracket.filter(m => m.stageIndex === currentStageIndex && !m.isBye);
+
+  stageMatches.forEach(m => {
+    const matchData = allMatchData[m.matchIndex];
+    if(!matchData) return;
+
+    const roundsContainer = document.getElementById('spec-rounds-' + m.matchIndex);
+    if(!roundsContainer) return;
+    roundsContainer.innerHTML = '';
+
+    let p1Total = 0, p2Total = 0;
+
+    for(let r = 0; r < ROUNDS_PER_MATCH; r++) {
+      const roundData = matchData['round' + r];
+      if(!roundData) break;
+
+      const row = document.createElement('div');
+      row.className = 'spec-round-row';
+
+      const p1Choice = roundData[m.p1];
+      const p2Choice = roundData[m.p2];
+
+      if(p1Choice && p2Choice) {
+        const pts = calcPoints(p1Choice, p2Choice);
+        p1Total += pts[0]; p2Total += pts[1];
+        const c1 = p1Choice === 'split' ? '<span class="c-split">Split</span>' : '<span class="c-steal">Steal</span>';
+        const c2 = p2Choice === 'split' ? '<span class="c-split">Split</span>' : '<span class="c-steal">Steal</span>';
+        row.innerHTML = '<span class="spec-round-label">Rd ' + (r+1) + '</span>' +
+          '<span class="spec-round-choices">' + c1 + ' vs ' + c2 + '</span>' +
+          '<span class="spec-round-pts">' + pts[0] + ' — ' + pts[1] + '</span>';
+      } else {
+        const s1 = p1Choice ? '🔒' : '...';
+        const s2 = p2Choice ? '🔒' : '...';
+        row.innerHTML = '<span class="spec-round-label">Rd ' + (r+1) + '</span>' +
+          '<span class="spec-round-choices spec-round-waiting">' +
+            '<span class="' + (p1Choice ? 'spec-locked' : '') + '">' + s1 + '</span>' +
+            '<span style="margin:0 8px;color:var(--muted)">vs</span>' +
+            '<span class="' + (p2Choice ? 'spec-locked' : '') + '">' + s2 + '</span>' +
+          '</span><span class="spec-round-pts"></span>';
+      }
+      roundsContainer.appendChild(row);
+    }
+
+    const scoreEl = document.getElementById('spec-score-' + m.matchIndex);
+    if(scoreEl) scoreEl.textContent = p1Total + ' — ' + p2Total;
+  });
+}
+
+function updateSpectatorWinners() {
+  const stageMatches = bracket.filter(m => m.stageIndex === currentStageIndex && !m.isBye);
+  stageMatches.forEach(m => {
+    const winnerEl = document.getElementById('spec-winner-' + m.matchIndex);
+    const card = document.getElementById('spec-card-' + m.matchIndex);
+    if(!winnerEl || !card) return;
+    if(m.winner) {
+      card.classList.add('finished');
+      winnerEl.className = 'spec-match-winner' + (m.coinFlip ? ' coin-flip' : '');
+      winnerEl.textContent = playerName(m.winner) + ' advances' + (m.coinFlip ? ' (coin flip)' : '') + '!';
+    }
+  });
+}
+
+function renderSpectatorMatches() { buildSpectatorCards(); }
 
 function backToBracket() {
   loadBracketView();
@@ -1009,7 +1170,8 @@ function showChampion(champId) {
       } else if(m.p1 && m.p2) {
         const p1c = m.winner===m.p1?'winner':(m.winner?'loser':'');
         const p2c = m.winner===m.p2?'winner':(m.winner?'loser':'');
-        html += `<div class="bracket-match"><span class="bm-player ${p1c}">${playerName(m.p1)}</span><span class="bm-vs">vs</span><span class="bm-player ${p2c}">${playerName(m.p2)}</span>${m.winner?`<span class="bm-score c-gold">${m.p1Score}-${m.p2Score}</span>`:''}</div>`;
+        const coinTag = m.coinFlip ? ' 🪙' : '';
+        html += `<div class="bracket-match"><span class="bm-player ${p1c}">${playerName(m.p1)}</span><span class="bm-vs">vs</span><span class="bm-player ${p2c}">${playerName(m.p2)}</span>${m.winner?`<span class="bm-score c-gold">${m.p1Score}-${m.p2Score}${coinTag}</span>`:''}</div>`;
       }
     });
     html += '</div>';
