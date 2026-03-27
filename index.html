@@ -250,7 +250,7 @@
       </div>
     </div>
     <div class="card">
-      <label style="margin-bottom:12px">Players (<span id="playerCount">0</span>/10)</label>
+      <label style="margin-bottom:12px">Players (<span id="playerCount">0</span>/16)</label>
       <div class="players-list" id="playersList"></div>
     </div>
     <p class="waiting-msg" id="lobbyStatus">Waiting for players...</p>
@@ -453,7 +453,7 @@ async function joinRoom() {
     const data = snap.val();
     if(data.state!=='lobby') { flashError('Tournament already started'); return; }
     const pc = data.players ? Object.keys(data.players).length : 0;
-    if(pc>=10) { flashError('Room is full (max 10)'); return; }
+    if(pc>=16) { flashError('Room is full (max 16)'); return; }
     isHost = false;
     await roomRef.child('players/'+myId).set({name: myName});
     enterLobby();
